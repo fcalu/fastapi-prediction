@@ -161,14 +161,41 @@ def predecir_partido(data: PartidoRequest, simulaciones: int = 1000):
 
         # Prompt para ChatGPT
         prompt = f"""
-        Equipo local: {data.equipo_local}
-        xG: {stats_local['xg']:.2f}, Goles: {stats_local['goles_favor']:.2f}, Tiros al arco: {stats_local['tiros_arco']:.2f}, Posesión: {stats_local['posesion']:.2f}%, Tarjetas: {stats_local['tarjetas']:.2f}
+Eres un experto en predicción de partidos de fútbol usando inteligencia artificial avanzada y lógica basada en datos históricos.
 
-        Equipo visitante: {data.equipo_visitante}
-        xG: {stats_visitante['xg']:.2f}, Goles: {stats_visitante['goles_favor']:.2f}, Tiros al arco: {stats_visitante['tiros_arco']:.2f}, Posesión: {stats_visitante['posesion']:.2f}%, Tarjetas: {stats_visitante['tarjetas']:.2f}
+Analiza el siguiente partido:
 
-        ¿Cuál es el resultado más probable? Solo responde con '1' (gana local), 'X' (empate), o '2' (gana visitante), y explica en una línea tu razón.
-        """
+📌 EQUIPO LOCAL: {data.equipo_local}
+- Goles promedio: {stats_local['goles_favor']:.2f}
+- xG promedio: {stats_local['xg']:.2f}
+- Tiros al arco: {stats_local['tiros_arco']:.2f}
+- Posesión promedio: {stats_local['posesion']:.2f}%
+- Tarjetas promedio: {stats_local['tarjetas']:.2f}
+
+📌 EQUIPO VISITANTE: {data.equipo_visitante}
+- Goles promedio: {stats_visitante['goles_favor']:.2f}
+- xG promedio: {stats_visitante['xg']:.2f}
+- Tiros al arco: {stats_visitante['tiros_arco']:.2f}
+- Posesión promedio: {stats_visitante['posesion']:.2f}%
+- Tarjetas promedio: {stats_visitante['tarjetas']:.2f}
+
+📈 Con base en estos datos y el historial de ambos equipos:
+
+1. ¿Quién ganará el partido? Responde únicamente con:
+   - '1' si gana el equipo local,
+   - '2' si gana el visitante,
+   - 'X' si será empate.
+   Incluye una **breve razón técnica basada en los datos**.
+
+2. ¿Habrá más de 2.5 goles en el partido? Responde 'Sí' o 'No' con justificación basada en xG y goles históricos.
+
+3. ¿Cuál equipo es más probable que reciba más tarjetas? Responde con el nombre y explica por qué.
+
+4. ¿Qué equipo tendrá más tiros de esquina en promedio? Responde con el nombre y justifica con los datos.
+
+Devuelve las 4 respuestas como un **análisis profesional breve**. Sé concreto, objetivo y no inventes datos que no están presentes.
+"""
+
 
         prediccion_chatgpt = obtener_prediccion_chatgpt(prompt)
 

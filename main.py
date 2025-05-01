@@ -1,33 +1,84 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
-import os
 import numpy as np
-import logging
-import openai
+import os
+import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from contextlib import asynccontextmanager
 
-from dotenv import load_dotenv
-dotenv_path = os.path.join(os.path.dirname(__file__), "data", "api.env")
-load_dotenv(dotenv_path=dotenv_path)
+DATA_FOLDER = os.path.join(os.path.dirname(__file__), "data")
+MODEL_OVER25_PATH = os.path.join(DATA_FOLDER, "model_over25.pkl")
+MODEL_1X2_PATH = os.path.join(DATA_FOLDER, "model_1x2.pkl")
+
+class PartidoRequest(BaseModel):
+    liga: str
+    equipo_local: str
+    equipo_visitante: str
+
+FEATURES = [
+    "team_a_xg", "team_b_xg",
+    "home_team_shots_on_target", "away_team_shots_on_target",
+    "home_team_possession", "away_team_possession",
+    "home_team_yellow_cards", "away_team_yellow_cards",
+    "odds_ft_over25", "odds_btts_yes",
+    "odds_ft_home_team_win", "odds_ft_draw", "odds_ft_away_team_win"
+]
+
+TARGET_OVER25 = "over_25"
+TARGET_1X2 = "resultado_1x2"
+
+# Utilidades de entrenamiento
+def preparar_datos(df):
+    df = df.dropna(subset=FEATURES + ["total_goal_count", "home_team_goal_count", "away_team_goal_count"])
+
+    # Convertir columnas usadas a numéricas (forzar errores como NaN si hay texto)
+    for col in FEATURES:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    df = df.dropna(subset=FEATURES)  # volver a eliminar cualquier fila con valores inválidos
+
+    df[TARGET_OVER25] = (df["total_goal_count"] > 2.5).astype(int)
+    df[TARGET_1X2] = df.apply(lambda x: 1 if x['home_team_goal_count'] > x['away_team_goal_count'] else (2 if x['away_team_goal_count'] > x['home_team_goal_count'] else 0), axis=1)
+    
+    X = df[FEATURES]
+    y_over25 = df[TARGET_OVER25]
+    y_1x2 = df[TARGET_1X2]
+    return X, y_over25, y_1x2
 
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+def entrenar_y_guardar_modelos(df):
+    X, y_over25, y_1x2 = preparar_datos(df)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-def obtener_prediccion_chatgpt(prompt: str) -> str:
+    model_over25 = RandomForestClassifier(n_estimators=100, random_state=42)
+    model_over25.fit(X_scaled, y_over25)
+    joblib.dump((model_over25, scaler), MODEL_OVER25_PATH)
+
+    model_1x2 = RandomForestClassifier(n_estimators=100, random_state=42)
+    model_1x2.fit(X_scaled, y_1x2)
+    joblib.dump((model_1x2, scaler), MODEL_1X2_PATH)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("📊 Cargando y unificando CSV...")
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "Eres un experto en análisis de partidos de fútbol."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.choices[0].message.content.strip()
+        df = pd.concat([
+            pd.read_csv(os.path.join(DATA_FOLDER, f))
+            for f in os.listdir(DATA_FOLDER) if f.endswith(".csv")
+        ])
+        print("🔍 Validando columnas y tipos...")
+        entrenar_y_guardar_modelos(df)
+        print("✅ Modelos entrenados correctamente")
     except Exception as e:
-        return f"Error en IA: {str(e)}"
+        print(f"❌ Error al entrenar modelos: {e}")
+    yield
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,190 +88,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATA_FOLDER = os.path.join(os.path.dirname(__file__), 'data')
-logging.basicConfig(level=logging.INFO)
-
-class PartidoRequest(BaseModel):
-    liga: str
-    equipo_local: str
-    equipo_visitante: str
-
-def promedio_seguro(lista):
-    return float(np.mean(lista)) if lista else 1.0
-
-def calcular_metricas(hist, equipo):
-    goles, xg, tiros_arco, posesion, tarjetas = [], [], [], [], []
-    for _, row in hist.iterrows():
-        if row['home_team_name'] == equipo:
-            goles.append(row['home_team_goal_count'])
-            xg.append(row['team_a_xg'])
-            tiros_arco.append(row['home_team_shots_on_target'])
-            posesion.append(row['home_team_possession'])
-            tarjetas.append(row['home_team_yellow_cards'] + row['home_team_red_cards'])
-        elif row['away_team_name'] == equipo:
-            goles.append(row['away_team_goal_count'])
-            xg.append(row['team_b_xg'])
-            tiros_arco.append(row['away_team_shots_on_target'])
-            posesion.append(row['away_team_possession'])
-            tarjetas.append(row['away_team_yellow_cards'] + row['away_team_red_cards'])
-    return {
-        "goles_favor": promedio_seguro(goles),
-        "xg": promedio_seguro(xg),
-        "tiros_arco": promedio_seguro(tiros_arco),
-        "posesion": promedio_seguro(posesion),
-        "tarjetas": promedio_seguro(tarjetas)
-    }
-
-def calcular_puntuacion(stats):
-    return (
-        stats['goles_favor'] * 5 +
-        stats['xg'] * 4 +
-        stats['tiros_arco'] * 1.5 +
-        stats['posesion'] * 0.2 -
-        stats['tarjetas'] * 2
-    )
-
-@app.get("/ligas")
-def listar_ligas():
-    ligas = [f.replace('.csv', '') for f in os.listdir(DATA_FOLDER) if f.endswith('.csv')]
-    return {"ligas": ligas}
-
-@app.get("/equipos")
-def listar_equipos(liga: str):
+@app.post("/predecir-over25")
+def predecir_over25(data: PartidoRequest):
     try:
-        path = os.path.join(DATA_FOLDER, f"{liga}.csv")
-        df = pd.read_csv(path, skipinitialspace=True)
-
-        if 'home_team_name' not in df.columns or 'away_team_name' not in df.columns:
-            return {"error": "No se encontraron columnas 'home_team_name' o 'away_team_name'"}
-
-        equipos = sorted(set(df['home_team_name'].dropna()).union(set(df['away_team_name'].dropna())))
-        return {"equipos": equipos}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
-
-@app.post("/predecir")
-def predecir_partido(data: PartidoRequest, simulaciones: int = 1000):
-    try:
-        logging.info(f"Predicción solicitada para: {data}")
         path = os.path.join(DATA_FOLDER, f"{data.liga}.csv")
-        df = pd.read_csv(path, skipinitialspace=True)
+        df = pd.read_csv(path)
 
-        required_cols = [
-            'home_team_name', 'away_team_name',
-            'home_team_goal_count', 'away_team_goal_count',
-            'team_a_xg', 'team_b_xg',
-            'home_team_shots_on_target', 'away_team_shots_on_target',
-            'home_team_possession', 'away_team_possession',
-            'home_team_yellow_cards', 'away_team_yellow_cards',
-            'home_team_red_cards', 'away_team_red_cards'
-        ]
+        partido = df[
+            (df["home_team_name"] == data.equipo_local) &
+            (df["away_team_name"] == data.equipo_visitante)
+        ].tail(1)
 
-        missing = [col for col in required_cols if col not in df.columns]
-        if missing:
-            return {"error": f"Faltan columnas: {missing}"}
+        if partido.empty:
+            raise HTTPException(status_code=404, detail="Partido no encontrado")
 
-        df = df.dropna(subset=required_cols)
+        X_pred = partido[FEATURES]
+        model, scaler = joblib.load(MODEL_OVER25_PATH)
+        proba = model.predict_proba(scaler.transform(X_pred))[0][1]
+        return {"probabilidad_over25": round(proba * 100, 2)}
 
-        local_total = pd.concat([df[df['home_team_name'] == data.equipo_local], df[df['away_team_name'] == data.equipo_local]])
-        visitante_total = pd.concat([df[df['home_team_name'] == data.equipo_visitante], df[df['away_team_name'] == data.equipo_visitante]])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        if local_total.empty or visitante_total.empty:
-            return {
-                "probabilidades": {"local": 33.33, "empate": 33.33, "visitante": 33.33},
-                "prediccion_final": "No hay suficiente historial para generar una predicción confiable"
-            }
+@app.post("/predecir-1x2")
+def predecir_1x2(data: PartidoRequest):
+    try:
+        path = os.path.join(DATA_FOLDER, f"{data.liga}.csv")
+        df = pd.read_csv(path)
 
-        stats_local = calcular_metricas(local_total, data.equipo_local)
-        stats_visitante = calcular_metricas(visitante_total, data.equipo_visitante)
+        partido = df[
+            (df["home_team_name"] == data.equipo_local) &
+            (df["away_team_name"] == data.equipo_visitante)
+        ].tail(1)
 
-        puntuacion_local = calcular_puntuacion(stats_local)
-        puntuacion_visitante = calcular_puntuacion(stats_visitante)
+        if partido.empty:
+            raise HTTPException(status_code=404, detail="Partido no encontrado")
 
-        local_wins = 0
-        draws = 0
-        visitante_wins = 0
-
-        for _ in range(simulaciones):
-            rl = np.random.normal(loc=puntuacion_local, scale=3)
-            rv = np.random.normal(loc=puntuacion_visitante, scale=3)
-            if rl > rv + 1.5:
-                local_wins += 1
-            elif rv > rl + 1.5:
-                visitante_wins += 1
-            else:
-                draws += 1
-
-        prob_local = round((local_wins / simulaciones) * 100, 2)
-        prob_empate = round((draws / simulaciones) * 100, 2)
-        prob_visitante = round((visitante_wins / simulaciones) * 100, 2)
-
-        # Prompt para ChatGPT
-        prompt = f"""
-Eres un experto en predicción de partidos de fútbol usando inteligencia artificial avanzada y lógica basada en datos históricos.
-
-Analiza el siguiente partido:
-
-📌 EQUIPO LOCAL: {data.equipo_local}
-- Goles promedio: {stats_local['goles_favor']:.2f}
-- xG promedio: {stats_local['xg']:.2f}
-- Tiros al arco: {stats_local['tiros_arco']:.2f}
-- Posesión promedio: {stats_local['posesion']:.2f}%
-- Tarjetas promedio: {stats_local['tarjetas']:.2f}
-
-📌 EQUIPO VISITANTE: {data.equipo_visitante}
-- Goles promedio: {stats_visitante['goles_favor']:.2f}
-- xG promedio: {stats_visitante['xg']:.2f}
-- Tiros al arco: {stats_visitante['tiros_arco']:.2f}
-- Posesión promedio: {stats_visitante['posesion']:.2f}%
-- Tarjetas promedio: {stats_visitante['tarjetas']:.2f}
-
-📈 Con base en estos datos y el historial de ambos equipos:
-
-1. ¿Quién ganará el partido? Responde únicamente con:
-   - '1' si gana el equipo local,
-   - '2' si gana el visitante,
-   - 'X' si será empate.
-   Incluye una **breve razón técnica basada en los datos**.
-
-2. ¿Habrá más de 2.5 goles en el partido? Responde 'Sí' o 'No' con justificación basada en xG y goles históricos.
-
-3. ¿Cuál equipo es más probable que reciba más tarjetas? Responde con el nombre y explica por qué.
-
-4. ¿Qué equipo tendrá más tiros de esquina en promedio? Responde con el nombre y justifica con los datos.
-
-Devuelve las 4 respuestas como un **análisis profesional breve**. Sé concreto, objetivo y no inventes datos que no están presentes.
-"""
-
-
-        prediccion_chatgpt = obtener_prediccion_chatgpt(prompt)
-
+        X_pred = partido[FEATURES]
+        model, scaler = joblib.load(MODEL_1X2_PATH)
+        probs = model.predict_proba(scaler.transform(X_pred))[0]
         return {
-            "historial_partidos": len(df[(df['home_team_name'] == data.equipo_local) & (df['away_team_name'] == data.equipo_visitante)]),
-            "metricas_local": stats_local,
-            "metricas_visitante": stats_visitante,
-            "puntuacion_ia_local": round(puntuacion_local, 2),
-            "puntuacion_ia_visitante": round(puntuacion_visitante, 2),
-            "probabilidades": {
-                "local": prob_local,
-                "empate": prob_empate,
-                "visitante": prob_visitante
-            },
-            "prediccion_chatgpt": prediccion_chatgpt
+            "1_local": round(probs[1] * 100, 2),
+            "X_empate": round(probs[0] * 100, 2),
+            "2_visitante": round(probs[2] * 100, 2)
         }
 
     except Exception as e:
-        logging.error(f"Error al predecir: {str(e)}")
-        return {
-            "error": str(e),
-            "probabilidades": {
-                "local": 33.33,
-                "empate": 33.33,
-                "visitante": 33.33
-            },
-            "prediccion_final": "Error al procesar los datos, intenta con otra liga o equipos"
-        }
+        raise HTTPException(status_code=500, detail=str(e))

@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 DATA_FOLDER = os.path.join(os.path.dirname(__file__), "data")
 MODEL_OVER25_PATH = os.path.join(DATA_FOLDER, "model_over25.pkl")
 MODEL_1X2_PATH = os.path.join(DATA_FOLDER, "model_1x2.pkl")
+MODEL_BTTS_PATH = os.path.join(DATA_FOLDER, "model_btts.pkl")
 
 class PartidoRequest(BaseModel):
     liga: str
@@ -27,23 +28,33 @@ FEATURES = [
     "odds_ft_home_team_win", "odds_ft_draw", "odds_ft_away_team_win"
 ]
 
+EXTRA_FEATURES = [
+    "home_team_corner_count", "away_team_corner_count",
+    "btts_percentage_pre_match", "over_25_percentage_pre_match",
+    "odds_btts_no"
+]
+
+ALL_FEATURES = FEATURES + EXTRA_FEATURES
+
 TARGET_OVER25 = "over_25"
 TARGET_1X2 = "resultado_1x2"
+TARGET_BTTS = "btts"
 
 def preparar_datos(df):
-    df = df.dropna(subset=FEATURES + ["total_goal_count", "home_team_goal_count", "away_team_goal_count"])
-    for col in FEATURES:
+    df = df.dropna(subset=ALL_FEATURES + ["total_goal_count", "home_team_goal_count", "away_team_goal_count"])
+    for col in ALL_FEATURES:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df.dropna(subset=FEATURES)
+    df = df.dropna(subset=ALL_FEATURES)
+
     df[TARGET_OVER25] = (df["total_goal_count"] > 2.5).astype(int)
     df[TARGET_1X2] = df.apply(lambda x: 1 if x['home_team_goal_count'] > x['away_team_goal_count'] else (2 if x['away_team_goal_count'] > x['home_team_goal_count'] else 0), axis=1)
-    X = df[FEATURES]
-    y_over25 = df[TARGET_OVER25]
-    y_1x2 = df[TARGET_1X2]
-    return X, y_over25, y_1x2
+    df[TARGET_BTTS] = ((df["home_team_goal_count"] > 0) & (df["away_team_goal_count"] > 0)).astype(int)
+
+    X = df[ALL_FEATURES]
+    return X, df[TARGET_OVER25], df[TARGET_1X2], df[TARGET_BTTS]
 
 def entrenar_y_guardar_modelos(df):
-    X, y_over25, y_1x2 = preparar_datos(df)
+    X, y_over25, y_1x2, y_btts = preparar_datos(df)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
@@ -54,6 +65,10 @@ def entrenar_y_guardar_modelos(df):
     model_1x2 = RandomForestClassifier(n_estimators=100, random_state=42)
     model_1x2.fit(X_scaled, y_1x2)
     joblib.dump((model_1x2, scaler), MODEL_1X2_PATH)
+
+    model_btts = RandomForestClassifier(n_estimators=100, random_state=42)
+    model_btts.fit(X_scaled, y_btts)
+    joblib.dump((model_btts, scaler), MODEL_BTTS_PATH)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -80,85 +95,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/equipos")
-def listar_equipos(liga: str):
-    try:
-        archivos = [f for f in os.listdir(DATA_FOLDER) if f.lower().replace(" ", "") == f"{liga}".lower().replace(" ", "") + ".csv"]
-        if not archivos:
-            raise HTTPException(status_code=404, detail="Liga no encontrada")
-        path = os.path.join(DATA_FOLDER, archivos[0])
-        df = pd.read_csv(path)
-
-        equipos_locales = df["home_team_name"].dropna().unique().tolist()
-        equipos_visitantes = df["away_team_name"].dropna().unique().tolist()
-        equipos = sorted(set(equipos_locales + equipos_visitantes))
-        return {"equipos": equipos}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"No se pudieron cargar los equipos: {e}")
-
-@app.post("/predecir-over25")
-def predecir_over25(data: PartidoRequest):
-    try:
-        archivos = [f for f in os.listdir(DATA_FOLDER) if f.lower().replace(" ", "") == f"{data.liga}".lower().replace(" ", "") + ".csv"]
-        if not archivos:
-            raise HTTPException(status_code=404, detail="Liga no encontrada")
-        path = os.path.join(DATA_FOLDER, archivos[0])
-        df = pd.read_csv(path)
-
-        partido = df[
-            (df["home_team_name"] == data.equipo_local) &
-            (df["away_team_name"] == data.equipo_visitante)
-        ].tail(1)
-
-        if partido.empty:
-            raise HTTPException(status_code=404, detail="Partido no encontrado")
-
-        X_pred = partido[FEATURES]
-        model, scaler = joblib.load(MODEL_OVER25_PATH)
-        proba = model.predict_proba(scaler.transform(X_pred))[0][1]
-        return {"probabilidad_over25": round(proba * 100, 2)}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/predecir-1x2")
-def predecir_1x2(data: PartidoRequest):
-    try:
-        archivos = [f for f in os.listdir(DATA_FOLDER) if f.lower().replace(" ", "") == f"{data.liga}".lower().replace(" ", "") + ".csv"]
-        if not archivos:
-            raise HTTPException(status_code=404, detail="Liga no encontrada")
-        path = os.path.join(DATA_FOLDER, archivos[0])
-        df = pd.read_csv(path)
-
-        partido = df[
-            (df["home_team_name"] == data.equipo_local) &
-            (df["away_team_name"] == data.equipo_visitante)
-        ].tail(1)
-
-        if partido.empty:
-            raise HTTPException(status_code=404, detail="Partido no encontrado")
-
-        X_pred = partido[FEATURES]
-        model, scaler = joblib.load(MODEL_1X2_PATH)
-        probs = model.predict_proba(scaler.transform(X_pred))[0]
-        return {
-            "1_local": round(probs[1] * 100, 2),
-            "X_empate": round(probs[0] * 100, 2),
-            "2_visitante": round(probs[2] * 100, 2)
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/ligas")
-def listar_ligas():
-    try:
-        archivos = [f for f in os.listdir(DATA_FOLDER) if f.endswith(".csv")]
-        ligas = [f.replace(".csv", "") for f in archivos]
-        return {"ligas": ligas}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"No se pudieron cargar las ligas: {e}")
-
 @app.post("/analisis-avanzado")
 def analisis_avanzado(data: PartidoRequest):
     try:
@@ -179,14 +115,16 @@ def analisis_avanzado(data: PartidoRequest):
 
         model_1x2, scaler_1x2 = joblib.load(MODEL_1X2_PATH)
         model_over25, scaler_over25 = joblib.load(MODEL_OVER25_PATH)
+        model_btts, scaler_btts = joblib.load(MODEL_BTTS_PATH)
 
         partido = df[(df['home_team_name'] == data.equipo_local) & (df['away_team_name'] == data.equipo_visitante)].tail(1)
         if partido.empty:
             raise HTTPException(status_code=404, detail="Partido no encontrado")
 
-        X_pred = partido[FEATURES]
+        X_pred = partido[ALL_FEATURES]
         proba_1x2 = model_1x2.predict_proba(scaler_1x2.transform(X_pred))[0]
         proba_over = model_over25.predict_proba(scaler_over25.transform(X_pred))[0][1]
+        proba_btts = model_btts.predict_proba(scaler_btts.transform(X_pred))[0][1]
 
         cuotas = {
             '1': partido['odds_ft_home_team_win'].values[0],
@@ -207,13 +145,20 @@ def analisis_avanzado(data: PartidoRequest):
         if goles_visitante < 1: analisis.append(f"El visitante tiene un promedio bajo: {goles_visitante:.2f} goles fuera de casa.")
         if len(h2h) >= 3 and h2h['total_goal_count'].mean() > 2.5:
             analisis.append("Históricamente, estos equipos superan los 2.5 goles por partido.")
+        if proba_btts > 0.6:
+            analisis.append("Alta probabilidad de que ambos equipos anoten (BTTS).")
+        if partido['btts_percentage_pre_match'].values[0] > 60:
+            analisis.append("Las estadísticas pre-partido muestran tendencia a BTTS.")
+        if partido['over_25_percentage_pre_match'].values[0] > 65:
+            analisis.append("Alta tendencia histórica al Over 2.5 goles.")
 
         return {
             "probabilidades": {
                 "local": round(proba_1x2[1] * 100, 2),
                 "empate": round(proba_1x2[0] * 100, 2),
                 "visitante": round(proba_1x2[2] * 100, 2),
-                "over_25": round(proba_over * 100, 2)
+                "over_25": round(proba_over * 100, 2),
+                "btts": round(proba_btts * 100, 2)
             },
             "value_bet_detectado": value_bets,
             "recomendacion": value_bets[0] if value_bets else "Ninguna clara",

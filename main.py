@@ -30,7 +30,6 @@ FEATURES = [
 TARGET_OVER25 = "over_25"
 TARGET_1X2 = "resultado_1x2"
 
-# Utilidades de entrenamiento
 def preparar_datos(df):
     df = df.dropna(subset=FEATURES + ["total_goal_count", "home_team_goal_count", "away_team_goal_count"])
     for col in FEATURES:
@@ -97,7 +96,6 @@ def listar_equipos(liga: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"No se pudieron cargar los equipos: {e}")
 
-
 @app.post("/predecir-over25")
 def predecir_over25(data: PartidoRequest):
     try:
@@ -152,7 +150,6 @@ def predecir_1x2(data: PartidoRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/ligas")
 def listar_ligas():
     try:
@@ -162,3 +159,66 @@ def listar_ligas():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"No se pudieron cargar las ligas: {e}")
 
+@app.post("/analisis-avanzado")
+def analisis_avanzado(data: PartidoRequest):
+    try:
+        archivos = [f for f in os.listdir(DATA_FOLDER) if f.lower().replace(" ", "") == f"{data.liga}".lower().replace(" ", "") + ".csv"]
+        if not archivos:
+            raise HTTPException(status_code=404, detail="Liga no encontrada")
+        path = os.path.join(DATA_FOLDER, archivos[0])
+        df = pd.read_csv(path)
+
+        historial_local = df[(df['home_team_name'] == data.equipo_local)]
+        historial_visitante = df[(df['away_team_name'] == data.equipo_visitante)]
+        h2h = df[(df['home_team_name'] == data.equipo_local) & (df['away_team_name'] == data.equipo_visitante)]
+
+        goles_local = historial_local['home_team_goal_count'].mean()
+        goles_visitante = historial_visitante['away_team_goal_count'].mean()
+        xg_local = historial_local['team_a_xg'].mean()
+        xg_visitante = historial_visitante['team_b_xg'].mean()
+
+        model_1x2, scaler_1x2 = joblib.load(MODEL_1X2_PATH)
+        model_over25, scaler_over25 = joblib.load(MODEL_OVER25_PATH)
+
+        partido = df[(df['home_team_name'] == data.equipo_local) & (df['away_team_name'] == data.equipo_visitante)].tail(1)
+        if partido.empty:
+            raise HTTPException(status_code=404, detail="Partido no encontrado")
+
+        X_pred = partido[FEATURES]
+        proba_1x2 = model_1x2.predict_proba(scaler_1x2.transform(X_pred))[0]
+        proba_over = model_over25.predict_proba(scaler_over25.transform(X_pred))[0][1]
+
+        cuotas = {
+            '1': partido['odds_ft_home_team_win'].values[0],
+            'X': partido['odds_ft_draw'].values[0],
+            '2': partido['odds_ft_away_team_win'].values[0]
+        }
+        prob_implicitas = {k: 100 / v for k, v in cuotas.items()}
+        suma = sum(prob_implicitas.values())
+        prob_implicitas = {k: v * 100 / suma for k, v in prob_implicitas.items()}
+
+        value_bets = []
+        if proba_1x2[1] * 100 > prob_implicitas['1']: value_bets.append("Local")
+        if proba_1x2[0] * 100 > prob_implicitas['X']: value_bets.append("Empate")
+        if proba_1x2[2] * 100 > prob_implicitas['2']: value_bets.append("Visitante")
+
+        analisis = []
+        if goles_local > 1.5: analisis.append(f"El equipo local promedia {goles_local:.2f} goles como local.")
+        if goles_visitante < 1: analisis.append(f"El visitante tiene un promedio bajo: {goles_visitante:.2f} goles fuera de casa.")
+        if len(h2h) >= 3 and h2h['total_goal_count'].mean() > 2.5:
+            analisis.append("Históricamente, estos equipos superan los 2.5 goles por partido.")
+
+        return {
+            "probabilidades": {
+                "local": round(proba_1x2[1] * 100, 2),
+                "empate": round(proba_1x2[0] * 100, 2),
+                "visitante": round(proba_1x2[2] * 100, 2),
+                "over_25": round(proba_over * 100, 2)
+            },
+            "value_bet_detectado": value_bets,
+            "recomendacion": value_bets[0] if value_bets else "Ninguna clara",
+            "analisis": analisis
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en análisis avanzado: {str(e)}")

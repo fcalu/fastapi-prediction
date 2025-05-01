@@ -6,7 +6,6 @@ import numpy as np
 import os
 import joblib
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from contextlib import asynccontextmanager
 
@@ -34,21 +33,15 @@ TARGET_1X2 = "resultado_1x2"
 # Utilidades de entrenamiento
 def preparar_datos(df):
     df = df.dropna(subset=FEATURES + ["total_goal_count", "home_team_goal_count", "away_team_goal_count"])
-
-    # Convertir columnas usadas a numéricas (forzar errores como NaN si hay texto)
     for col in FEATURES:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    df = df.dropna(subset=FEATURES)  # volver a eliminar cualquier fila con valores inválidos
-
+    df = df.dropna(subset=FEATURES)
     df[TARGET_OVER25] = (df["total_goal_count"] > 2.5).astype(int)
     df[TARGET_1X2] = df.apply(lambda x: 1 if x['home_team_goal_count'] > x['away_team_goal_count'] else (2 if x['away_team_goal_count'] > x['home_team_goal_count'] else 0), axis=1)
-    
     X = df[FEATURES]
     y_over25 = df[TARGET_OVER25]
     y_1x2 = df[TARGET_1X2]
     return X, y_over25, y_1x2
-
 
 def entrenar_y_guardar_modelos(df):
     X, y_over25, y_1x2 = preparar_datos(df)
@@ -91,7 +84,10 @@ app.add_middleware(
 @app.post("/predecir-over25")
 def predecir_over25(data: PartidoRequest):
     try:
-        path = os.path.join(DATA_FOLDER, f"{data.liga}.csv")
+        archivos = [f for f in os.listdir(DATA_FOLDER) if f.lower().replace(" ", "") == f"{data.liga}".lower().replace(" ", "") + ".csv"]
+        if not archivos:
+            raise HTTPException(status_code=404, detail="Liga no encontrada")
+        path = os.path.join(DATA_FOLDER, archivos[0])
         df = pd.read_csv(path)
 
         partido = df[
@@ -113,7 +109,10 @@ def predecir_over25(data: PartidoRequest):
 @app.post("/predecir-1x2")
 def predecir_1x2(data: PartidoRequest):
     try:
-        path = os.path.join(DATA_FOLDER, f"{data.liga}.csv")
+        archivos = [f for f in os.listdir(DATA_FOLDER) if f.lower().replace(" ", "") == f"{data.liga}".lower().replace(" ", "") + ".csv"]
+        if not archivos:
+            raise HTTPException(status_code=404, detail="Liga no encontrada")
+        path = os.path.join(DATA_FOLDER, archivos[0])
         df = pd.read_csv(path)
 
         partido = df[
@@ -135,3 +134,14 @@ def predecir_1x2(data: PartidoRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ligas")
+def listar_ligas():
+    try:
+        archivos = [f for f in os.listdir(DATA_FOLDER) if f.endswith(".csv")]
+        ligas = [f.replace(".csv", "") for f in archivos]
+        return {"ligas": ligas}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"No se pudieron cargar las ligas: {e}")
+

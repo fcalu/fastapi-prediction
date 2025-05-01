@@ -160,7 +160,6 @@ def analisis_avanzado(data: PartidoRequest):
                 "over_25": round(proba_over * 100, 2),
                 "btts": round(proba_btts * 100, 2)
             },
-            "value_bet_detectado": value_bets,
             "recomendacion": value_bets[0] if value_bets else "Ninguna clara",
             "analisis": analisis
         }

@@ -94,6 +94,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.get("/ligas")
+def listar_ligas():
+    try:
+        archivos = [f for f in os.listdir(DATA_FOLDER) if f.endswith(".csv")]
+        ligas = [f.replace(".csv", "") for f in archivos]
+        return {"ligas": ligas}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"No se pudieron cargar las ligas: {e}")
 
 @app.post("/analisis-avanzado")
 def analisis_avanzado(data: PartidoRequest):

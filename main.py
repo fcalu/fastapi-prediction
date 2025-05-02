@@ -103,6 +103,23 @@ def listar_ligas():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"No se pudieron cargar las ligas: {e}")
 
+@app.get("/equipos")
+def listar_equipos(liga: str):
+    try:
+        archivos = [f for f in os.listdir(DATA_FOLDER) if f.lower().replace(" ", "") == f"{liga}".lower().replace(" ", "") + ".csv"]
+        if not archivos:
+            raise HTTPException(status_code=404, detail="Liga no encontrada")
+        path = os.path.join(DATA_FOLDER, archivos[0])
+        df = pd.read_csv(path)
+
+        equipos_locales = df["home_team_name"].dropna().unique().tolist()
+        equipos_visitantes = df["away_team_name"].dropna().unique().tolist()
+        equipos = sorted(set(equipos_locales + equipos_visitantes))
+        return {"equipos": equipos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"No se pudieron cargar los equipos: {e}")
+
+
 @app.post("/analisis-avanzado")
 def analisis_avanzado(data: PartidoRequest):
     try:
